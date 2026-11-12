@@ -27,14 +27,19 @@ export const DELIVERY_CATEGORIES: Array<Pick<ShoppingCategory, "id" | "title" | 
 
 export function extractDongwanWorldContext(): string {
   try {
-    const books = loadWorldBooks();
+    const books = loadWorldBooks() as Array<{
+      name?: string;
+      description?: string;
+      entries?: Array<{ key?: string; keys?: string[]; content?: string }>;
+    }>;
     const matched = books.filter(b => /东湾|都会圈|都会/i.test(b.name || ""));
     const lines: string[] = [];
     for (const b of matched) {
       if (b.description?.trim()) lines.push(`【世界观背景】${b.description.trim()}`);
       for (const entry of (b.entries || []).slice(0, 10)) {
+        const keyText = entry.key?.trim() || (Array.isArray(entry.keys) ? entry.keys.join("、") : "");
         if (entry.content?.trim()) {
-          const key = entry.key?.trim() ? `（${entry.key.trim()}）` : "";
+          const key = keyText ? `（${keyText}）` : "";
           lines.push(`- ${key}${entry.content.trim().slice(0, 200)}`);
         }
       }
