@@ -1,8 +1,8 @@
 import { previewMessagesForApi, sendLLMRequest } from "./chat-engine";
-import { loadApiConfigs, loadBindingConfig } from "./settings-storage";
+import { loadApiConfigs, loadBindingConfig, loadWorldBooks } from "./settings-storage";
 import type { CheckPhoneShoppingProduct, CheckPhoneShoppingTone } from "./checkphone-config";
 import type { ApiConfig } from "./settings-types";
-import type { ShoppingCatalog, ShoppingCategory, ShoppingRefreshResult, ShoppingSearchResponse } from "./shopping-types";
+import type { ShoppingCatalog, ShoppingCategory, ShoppingProduct, ShoppingRefreshResult, ShoppingSearchResponse } from "./shopping-types";
 import type { LLMMessage } from "./llm-prompt-assembler";
 
 export const SHOPPING_RECOMMENDATION_CATEGORIES: Array<Pick<ShoppingCategory, "id" | "title" | "subtitle">> = [
@@ -14,9 +14,57 @@ export const SHOPPING_RECOMMENDATION_CATEGORIES: Array<Pick<ShoppingCategory, "i
   { id: "hobby", title: "文具兴趣", subtitle: "纸品、手作、阅读、运动和旅行小物" },
 ];
 
+export const DELIVERY_CATEGORIES: Array<Pick<ShoppingCategory, "id" | "title" | "subtitle">> = [
+  { id: "chinese", title: "中餐", subtitle: "特色热炒、品质拌饭、粉面与家常风味" },
+  { id: "foreign", title: "异国料理", subtitle: "西式餐点、日韩简餐、南洋风情便当" },
+  { id: "drinks", title: "饮品", subtitle: "现磨咖啡、鲜萃茶饮、冷压果汁与特调" },
+  { id: "desserts", title: "甜品烘焙", subtitle: "手作烘焙、西点蛋糕、法式甜羹与冰品" },
+  { id: "fruits", title: "水果生鲜", subtitle: "应季鲜果、品质切盒、有机生鲜食材" },
+  { id: "convenience", title: "便利店超市", subtitle: "零食饮料、即食夜宵、个人日用急需" },
+  { id: "flowers", title: "鲜花", subtitle: "礼遇花束、桌面绿植、每日鲜切花" },
+  { id: "pharmacy", title: "药店", subtitle: "居家应急、常备健康、护理与急救用品" },
+];
+
+/** 提取「东湾都会圈」世界书中的地域区划与设定信息，用于注入 Prompt */
+export function extractDongwanWorldContext(): string {
+  try {
+    const books = loadWorldBooks();
+    const matched = books.filter(b => /东湾|都会圈|都会/i.test(b.name || ""));
+    const lines: string[] = [];
+    for (const b of matched) {
+      if (b.description?.trim()) lines.push(`【世界观背景】${b.description.trim()}`);
+      for (const entry of (b.entries || []).slice(0, 10)) {
+        if (entry.content?.trim()) {
+          const key = entry.key?.trim() ? `（${entry.key.trim()}）` : "";
+          lines.push(`- ${key}${entry.content.trim().slice(0, 200)}`);
+        }
+      }
+    }
+    return lines.slice(0, 8).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+export function buildShoppingWorldConstraintHint(): string {
+  const dongwan = extractDongwanWorldContext();
+  const base = [
+    "【重要世界观规则 - 绝对执行】：",
+    "1. 世界观是完全架空的（核心设定：东湾都会圈）。严禁出现任何现实中具体的省市、县镇、现实地方小吃名或带有强烈现实地域色彩的名字（例如：绝对不要出现「安徽板面」「沙县小吃」「老北京炸酱面」「武汉热干面」「兰州拉面」等带有现实地名的商品或店铺）。",
+    "2. 地名、区域、商业街、配送地址若需要提及，可融合「东湾都会圈」的设定或使用自然都市架空名（如：东湾中央区、湾港大道、云湾里、星海汇、新港路等）。",
+    "3. 允许且推荐出现真实的全球商业品牌（例如：费列罗巧克力、星巴克、索尼、罗技、戴森、可口可乐等纯商业品牌均可真实自然出现）。",
+  ];
+  if (dongwan) {
+    base.push("【关联世界书·东湾都会圈设定参考】：", dongwan);
+  }
+  return base.join("\n");
+}
+
 export const DEFAULT_SHOPPING_REFRESH_PROMPT = [
   "<shopping_refresh_instruction>",
   "你正在为一个独立购物 App 生成首页分类推荐商品流。",
+  "",
+  buildShoppingWorldConstraintHint(),
   "",
   "要求：",
   "- 只生成可以浏览和购买的首页推荐商品，不要生成最近浏览、收藏、购物车或订单。",
@@ -32,7 +80,7 @@ export const DEFAULT_SHOPPING_REFRESH_PROMPT = [
   "[分类]数码好物",
   "[名称]商品名称",
   "[店铺]店铺名称",
-  "[价格]价格",
+  "[价格]¥99",
   "[说明]列表短说明",
   "[详情]商品详情文本",
   "[图标]商品图标",
@@ -41,7 +89,7 @@ export const DEFAULT_SHOPPING_REFRESH_PROMPT = [
   "[分类]数码好物",
   "[名称]商品名称",
   "[店铺]店铺名称",
-  "[价格]价格",
+  "[价格]¥199",
   "[说明]列表短说明",
   "[详情]商品详情文本",
   "[图标]商品图标",
@@ -55,21 +103,64 @@ export const DEFAULT_SHOPPING_REFRESH_PROMPT = [
   "</shopping_refresh_instruction>",
 ].join("\n");
 
-export const DEFAULT_SHOPPING_SEARCH_PROMPT = [
-  "<shopping_search_instruction>",
-  "你正在为一个独立购物 App 的搜索词“{{query}}”生成搜索结果商品流。",
+export const DEFAULT_DELIVERY_REFRESH_PROMPT = [
+  "<delivery_refresh_instruction>",
+  "你正在为一个外卖即时配送 App 生成外卖店铺与餐品推荐流。",
+  "",
+  buildShoppingWorldConstraintHint(),
   "",
   "要求：",
-  "- 只生成与搜索词“{{query}}”高度相关、可以浏览和购买的商品。",
-  "- 不要生成首页分类推荐、最近浏览、收藏、购物车或订单。",
-  "- 不要写角色、人设、记忆、剧情或旁白。",
+  "- 属于即时配送的真实外卖店铺、轻食、饮品、便利商超与日常急需。",
+  "- 必须按以下 8 个分类推荐，每个分类 3 到 5 家精选外卖店铺/餐品：",
+  ...DELIVERY_CATEGORIES.map(category => `  - ${category.title}：${category.subtitle}`),
+  "- 店铺名称要鲜活真实、有市井或都市特色，但绝对不可出现带有现实省市地名的招牌（如安徽、沙县等）。",
+  "- 每条外卖餐品价格合理，[说明] 中标注预计送达时间（例如：28分钟·起送¥20·配送¥3）。",
+  "- [详情] 写餐品的份量、口感、食材搭配、温热冷饮状态或规格。",
+  "- [图标] 用单个美味、相关的食物/用品 emoji。",
+  "",
+  "输出格式：",
+  "#外卖1",
+  "[分类]中餐",
+  "[名称]黑椒牛柳葱香拌饭配温泉蛋",
+  "[店铺]慢火煲仔社·东湾中央店",
+  "[价格]¥36",
+  "[说明]30分钟送达·月售800+·配送¥3",
+  "[详情]精选牛里脊搭配秘制现熬黑椒酱，现煎温泉蛋，搭配每日鲜蔬与越光米饭。",
+  "[图标]🍱",
+  "",
+  "#外卖2",
+  "[分类]饮品",
+  "[名称]生椰冷萃冰咖啡",
+  "[店铺]星芒工坊精品咖啡（星海汇店）",
+  "[价格]¥24",
+  "[说明]25分钟送达·配保温袋·配送¥2",
+  "[详情]天然椰子水与冷萃浓缩分层交融，清甜回甘，零糖无负担。",
+  "[图标]☕",
+  "",
+  "规则：",
+  "- 每条外卖都必须有 [分类]，且分类名只能使用上面 8 个外卖分类名。",
+  "- 编号格式为 #外卖1、#外卖2、#外卖3 等依次连续编号。",
+  "- 只输出上述块格式内容，不要输出 Markdown 总结或系统解释。",
+  "</delivery_refresh_instruction>",
+].join("\n");
+
+export const DEFAULT_SHOPPING_SEARCH_PROMPT = [
+  "<shopping_search_instruction>",
+  "你正在为一个独立购物/外卖 App 的搜索词“{{query}}”生成搜索结果商品流。",
+  "",
+  buildShoppingWorldConstraintHint(),
+  "",
+  "要求：",
+  "- 只生成与搜索词“{{query}}”高度相关、可以浏览和购买的商品或外卖。",
+  "- 遵守架空世界观：严禁出现现实省市具体地名（如安徽、东北、沙县等），可使用东湾都会圈或商业品牌。",
   "- 商品要覆盖不同价位、不同风格和不同使用场景，但都必须围绕搜索词。",
   "- 商品名称、店铺、价格、说明和详情都要具体，像真实可购买的商品。",
-  "- [详情] 写商品本身的材质、规格、用途、质感、适用场景，不要写推荐理由或系统解释。",
+  "- [详情] 写商品或餐品的本身的材质、规格、用途、质感、适用场景。",
   "- [图标] 用单个直观、美观、和商品强相关的 emoji 或符号。",
   "",
   "输出格式：",
   "#搜索结果1",
+  "[分类]所属分类",
   "[名称]商品名称",
   "[店铺]店铺名称",
   "[价格]价格",
@@ -78,6 +169,7 @@ export const DEFAULT_SHOPPING_SEARCH_PROMPT = [
   "[图标]商品图标",
   "",
   "#搜索结果2",
+  "[分类]所属分类",
   "[名称]商品名称",
   "[店铺]店铺名称",
   "[价格]价格",
@@ -86,10 +178,8 @@ export const DEFAULT_SHOPPING_SEARCH_PROMPT = [
   "[图标]商品图标",
   "",
   "规则：",
-  "- 生成 12 到 18 条搜索结果。",
+  "- 生成 10 到 16 条搜索结果。",
   "- 所有商品使用连续编号，例如 #搜索结果1、#搜索结果2、#搜索结果3。",
-  "- 不要输出 #推荐、#最近浏览、#收藏、#购物车、#订单；这些由其他功能或用户交互产生。",
-  "- 示例字段值都是占位说明，实际输出必须替换成真实商品内容。",
   "- 只输出上述块格式内容，不要输出 Markdown、解释、代码块或 JSON。",
   "</shopping_search_instruction>",
 ].join("\n");
@@ -168,7 +258,7 @@ function extractProductBlocks(rawOutput: string, labels: string[]): ParsedRecomm
   });
 }
 
-function resolveCategory(value: string): Pick<ShoppingCategory, "id" | "title" | "subtitle"> {
+function resolveShoppingCategory(value: string): Pick<ShoppingCategory, "id" | "title" | "subtitle"> {
   const normalized = cleanText(value, 80);
   return (
     SHOPPING_RECOMMENDATION_CATEGORIES.find(category => category.title === normalized) ??
@@ -176,9 +266,23 @@ function resolveCategory(value: string): Pick<ShoppingCategory, "id" | "title" |
   );
 }
 
-function parseProduct(block: ParsedRecommendationBlock, index: number): { category: Pick<ShoppingCategory, "id" | "title" | "subtitle">; product: CheckPhoneShoppingProduct | null } {
+function resolveDeliveryCategory(value: string): Pick<ShoppingCategory, "id" | "title" | "subtitle"> {
+  const normalized = cleanText(value, 80);
+  return (
+    DELIVERY_CATEGORIES.find(category => category.title === normalized) ??
+    DELIVERY_CATEGORIES[0]
+  );
+}
+
+function parseShoppingProduct(
+  block: ParsedRecommendationBlock,
+  index: number,
+  kind: "shopping" | "delivery" = "shopping",
+): { category: Pick<ShoppingCategory, "id" | "title" | "subtitle">; product: ShoppingProduct | null } {
   const fields = block.fields;
-  const category = resolveCategory(fields["分类"]);
+  const category = kind === "delivery"
+    ? resolveDeliveryCategory(fields["分类"])
+    : resolveShoppingCategory(fields["分类"]);
   const title = cleanText(fields["名称"], 200);
   const merchantLabel = cleanText(fields["店铺"], 120);
   const priceLabel = cleanText(fields["价格"], 80);
@@ -190,11 +294,15 @@ function parseProduct(block: ParsedRecommendationBlock, index: number): { catego
     return { category, product: null };
   }
 
-  const signature = `${category.title}|${title}|${merchantLabel}|${priceLabel}|${previewIcon}`;
+  const signature = `${kind}|${category.title}|${title}|${merchantLabel}|${priceLabel}|${previewIcon}`;
+  const estimatedDeliveryMinutes = kind === "delivery"
+    ? Math.floor(Math.random() * 25) + 20
+    : undefined;
+
   return {
     category,
     product: {
-      id: `rec_${hashString(signature)}`,
+      id: `${kind}_${hashString(signature)}`,
       title,
       merchantLabel,
       priceLabel,
@@ -203,11 +311,18 @@ function parseProduct(block: ParsedRecommendationBlock, index: number): { catego
       detail,
       previewIcon,
       tone: deriveTone(index),
+      kind,
+      estimatedDeliveryMinutes,
+      packingFee: kind === "delivery" ? 2 : 0,
     },
   };
 }
 
-function parseSearchProduct(block: ParsedRecommendationBlock, query: string, index: number): CheckPhoneShoppingProduct | null {
+function parseSearchProduct(
+  block: ParsedRecommendationBlock,
+  query: string,
+  index: number,
+): ShoppingProduct | null {
   const fields = block.fields;
   const title = cleanText(fields["名称"], 200);
   const merchantLabel = cleanText(fields["店铺"], 120);
@@ -216,6 +331,8 @@ function parseSearchProduct(block: ParsedRecommendationBlock, query: string, ind
   const detail = cleanText(fields["详情"] || subtitle, 1200);
   const previewIcon = cleanText(fields["图标"], 8);
   const tagLabel = cleanText(fields["分类"], 80) || `搜索：${query}`;
+  const isDelivery = /外卖|餐|饭|茶|面|饮|食|菜|甜点|果/i.test(`${title} ${merchantLabel} ${tagLabel}`);
+  const kind = isDelivery ? "delivery" : "shopping";
 
   if (!title || !merchantLabel || !priceLabel || !subtitle || !detail || !previewIcon) {
     return null;
@@ -232,127 +349,224 @@ function parseSearchProduct(block: ParsedRecommendationBlock, query: string, ind
     detail,
     previewIcon,
     tone: deriveTone(index),
+    kind,
+    estimatedDeliveryMinutes: kind === "delivery" ? 30 : undefined,
   };
 }
 
-function parseShoppingCatalog(rawOutput: string): ShoppingCatalog | null {
+export function parseShoppingCatalog(rawOutput: string): ShoppingCatalog | null {
   const grouped = new Map<string, ShoppingCategory>();
   for (const category of SHOPPING_RECOMMENDATION_CATEGORIES) {
-    grouped.set(category.id, { ...category, items: [] });
+    grouped.set(category.id, {
+      id: category.id,
+      title: category.title,
+      subtitle: category.subtitle,
+      items: [],
+    });
   }
 
-  const products = extractProductBlocks(rawOutput, ["推荐"])
-    .sort((a, b) => a.order - b.order)
-    .map(parseProduct)
-    .filter((entry): entry is { category: Pick<ShoppingCategory, "id" | "title" | "subtitle">; product: CheckPhoneShoppingProduct } => Boolean(entry.product));
+  const blocks = extractProductBlocks(rawOutput, ["推荐", "商品", "好物"]);
+  const recommendations: ShoppingProduct[] = [];
 
-  for (const { category, product } of products) {
-    const group = grouped.get(category.id) ?? { ...category, items: [] };
-    if (!group.items.some(item => item.id === product.id)) {
-      group.items.push(product);
+  for (let index = 0; index < blocks.length; index += 1) {
+    const { category, product } = parseShoppingProduct(blocks[index], index, "shopping");
+    if (!product) continue;
+    recommendations.push(product);
+    const existing = grouped.get(category.id);
+    if (existing) {
+      existing.items.push(product);
+    } else {
+      grouped.set(category.id, {
+        id: category.id,
+        title: category.title,
+        subtitle: category.subtitle,
+        items: [product],
+      });
     }
-    grouped.set(category.id, group);
   }
 
-  const categories = SHOPPING_RECOMMENDATION_CATEGORIES
-    .map(category => grouped.get(category.id))
-    .filter((category): category is ShoppingCategory => Boolean(category && category.items.length > 0));
-
-  const recommendations = categories.flatMap(category => category.items);
-  return recommendations.length > 0 ? { categories, recommendations } : null;
-}
-
-function parseShoppingSearchResult(rawOutput: string, query: string): CheckPhoneShoppingProduct[] {
-  const seen = new Set<string>();
-  const results: CheckPhoneShoppingProduct[] = [];
-  const products = extractProductBlocks(rawOutput, ["搜索结果", "推荐"])
-    .sort((a, b) => a.order - b.order)
-    .map((block, index) => parseSearchProduct(block, query, index))
-    .filter((item): item is CheckPhoneShoppingProduct => Boolean(item));
-
-  for (const product of products) {
-    if (seen.has(product.id)) continue;
-    seen.add(product.id);
-    results.push(product);
+  const categories = [...grouped.values()].filter(category => category.items.length > 0);
+  if (categories.length === 0 && recommendations.length === 0) {
+    return null;
   }
 
-  return results;
+  return {
+    categories,
+    recommendations,
+  };
 }
 
-function applySearchPromptTemplate(prompt: string, query: string): string {
-  const template = prompt || DEFAULT_SHOPPING_SEARCH_PROMPT;
-  const filled = template
-    .replaceAll("{{query}}", query)
-    .replaceAll("{{搜索词}}", query)
-    .replaceAll("{{keyword}}", query);
-  return filled.includes(query)
-    ? filled
-    : `${filled}\n\n当前搜索词：${query}`;
+export function parseDeliveryCatalog(rawOutput: string): ShoppingCatalog | null {
+  const grouped = new Map<string, ShoppingCategory>();
+  for (const category of DELIVERY_CATEGORIES) {
+    grouped.set(category.id, {
+      id: category.id,
+      title: category.title,
+      subtitle: category.subtitle,
+      items: [],
+    });
+  }
+
+  const blocks = extractProductBlocks(rawOutput, ["外卖", "美食", "店铺", "推荐", "商品"]);
+  const recommendations: ShoppingProduct[] = [];
+
+  for (let index = 0; index < blocks.length; index += 1) {
+    const { category, product } = parseShoppingProduct(blocks[index], index, "delivery");
+    if (!product) continue;
+    recommendations.push(product);
+    const existing = grouped.get(category.id);
+    if (existing) {
+      existing.items.push(product);
+    } else {
+      grouped.set(category.id, {
+        id: category.id,
+        title: category.title,
+        subtitle: category.subtitle,
+        items: [product],
+      });
+    }
+  }
+
+  const categories = [...grouped.values()].filter(category => category.items.length > 0);
+  if (categories.length === 0 && recommendations.length === 0) {
+    return null;
+  }
+
+  return {
+    categories,
+    recommendations,
+  };
 }
 
-export async function generateShoppingCatalog(refreshPrompt: string): Promise<ShoppingRefreshResult> {
+export async function generateShoppingCatalog(customPrompt?: string): Promise<ShoppingRefreshResult> {
   const apiConfig = resolveShoppingApiConfig();
   if (!apiConfig) {
-    return { catalog: null, error: "未找到可用的 API 配置", rawOutput: "" };
+    return { catalog: null, error: "未找到可用的 API 配置，请先在设置中绑定模型。" };
   }
 
+  const systemContent = [
+    "你是一个严谨的结构化商品生成引擎。",
+    buildShoppingWorldConstraintHint(),
+    "严格按照指定的标记与编号输出真实具体的商品信息，绝不输出闲聊、代码块或 JSON。",
+  ].join("\n\n");
+
+  const prompt = cleanText(customPrompt, 16000) || DEFAULT_SHOPPING_REFRESH_PROMPT;
+  const messages: LLMMessage[] = [
+    { role: "system", content: systemContent },
+    { role: "user", content: prompt },
+  ];
+
   try {
-    const rawOutput = await sendLLMRequest(
+    const response = await sendLLMRequest(
       apiConfig,
       null,
-      [{ role: "user", content: refreshPrompt || DEFAULT_SHOPPING_REFRESH_PROMPT }],
+      messages,
       [],
-      { characterName: "购物App" },
-      { skipOutputRegex: true, appId: "shopping" },
+      { characterName: "购物助手" },
+      { appId: "checkphone" },
     );
-
-    if (!rawOutput.trim()) {
-      return { catalog: null, error: "LLM 返回为空", rawOutput };
-    }
-
-    const catalog = parseShoppingCatalog(rawOutput);
-    if (!catalog) {
-      return { catalog: null, error: "未找到有效的分类推荐商品块", rawOutput };
-    }
-
-    return { catalog, rawOutput };
+    const catalog = parseShoppingCatalog(response);
+    return {
+      catalog,
+      rawOutput: response,
+      error: catalog ? undefined : "模型返回的内容未包含可解析的推荐商品块。",
+    };
   } catch (error) {
     return {
       catalog: null,
-      error: error instanceof Error ? error.message : "生成失败",
-      rawOutput: "",
+      error: error instanceof Error ? error.message : "生成商品推荐失败，请重试。",
     };
   }
 }
 
-export async function generateShoppingSearchResults(query: string, searchPrompt: string): Promise<ShoppingSearchResponse> {
-  const normalizedQuery = cleanText(query, 80);
-  if (!normalizedQuery) {
-    return { result: null, error: "请输入搜索词", rawOutput: "" };
-  }
-
+export async function generateDeliveryCatalog(customPrompt?: string): Promise<ShoppingRefreshResult> {
   const apiConfig = resolveShoppingApiConfig();
   if (!apiConfig) {
-    return { result: null, error: "未找到可用的 API 配置", rawOutput: "" };
+    return { catalog: null, error: "未找到可用的 API 配置，请先在设置中绑定模型。" };
   }
 
+  const systemContent = [
+    "你是一个严谨的结构化外卖生成引擎。",
+    buildShoppingWorldConstraintHint(),
+    "严格按照指定的标记与编号输出真实鲜活的外卖店铺与餐品，绝不输出闲聊、代码块或 JSON。",
+  ].join("\n\n");
+
+  const prompt = cleanText(customPrompt, 16000) || DEFAULT_DELIVERY_REFRESH_PROMPT;
+  const messages: LLMMessage[] = [
+    { role: "system", content: systemContent },
+    { role: "user", content: prompt },
+  ];
+
   try {
-    const rawOutput = await sendLLMRequest(
+    const response = await sendLLMRequest(
       apiConfig,
       null,
-      [{ role: "user", content: applySearchPromptTemplate(searchPrompt, normalizedQuery) }],
+      messages,
       [],
-      { characterName: "购物App" },
-      { skipOutputRegex: true, appId: "shopping_search" },
+      { characterName: "外卖助手" },
+      { appId: "checkphone" },
     );
+    const catalog = parseDeliveryCatalog(response);
+    return {
+      catalog,
+      rawOutput: response,
+      error: catalog ? undefined : "模型返回的内容未包含可解析的外卖推荐块。",
+    };
+  } catch (error) {
+    return {
+      catalog: null,
+      error: error instanceof Error ? error.message : "生成外卖推荐失败，请重试。",
+    };
+  }
+}
 
-    if (!rawOutput.trim()) {
-      return { result: null, error: "LLM 返回为空", rawOutput };
-    }
+export async function generateShoppingSearchResults(
+  query: string,
+  customPrompt?: string,
+): Promise<ShoppingSearchResponse> {
+  const apiConfig = resolveShoppingApiConfig();
+  if (!apiConfig) {
+    return { result: null, error: "未找到可用的 API 配置，请先在设置中绑定模型。" };
+  }
 
-    const items = parseShoppingSearchResult(rawOutput, normalizedQuery);
+  const normalizedQuery = cleanText(query, 80);
+  if (!normalizedQuery) {
+    return { result: null, error: "搜索词不能为空。" };
+  }
+
+  const systemContent = [
+    "你是一个严谨的结构化商品搜索结果生成引擎。",
+    buildShoppingWorldConstraintHint(),
+    "严格按照指定的标记与编号输出与搜索词相关的商品，绝不输出闲聊、代码块或 JSON。",
+  ].join("\n\n");
+
+  const promptTemplate = cleanText(customPrompt, 16000) || DEFAULT_SHOPPING_SEARCH_PROMPT;
+  const userPrompt = promptTemplate.replace(/\{\{query\}\}/gi, normalizedQuery);
+  const messages: LLMMessage[] = [
+    { role: "system", content: systemContent },
+    { role: "user", content: userPrompt },
+  ];
+
+  try {
+    const response = await sendLLMRequest(
+      apiConfig,
+      null,
+      messages,
+      [],
+      { characterName: "购物搜索助手" },
+      { appId: "checkphone" },
+    );
+    const blocks = extractProductBlocks(response, ["搜索结果", "结果", "商品"]);
+    const items = blocks
+      .map((block, index) => parseSearchProduct(block, normalizedQuery, index))
+      .filter((item): item is ShoppingProduct => Boolean(item));
+
     if (items.length === 0) {
-      return { result: null, error: "未找到有效的搜索结果商品块", rawOutput };
+      return {
+        result: null,
+        rawOutput: response,
+        error: "未能从模型回复中解析出搜索商品。",
+      };
     }
 
     return {
@@ -361,31 +575,12 @@ export async function generateShoppingSearchResults(query: string, searchPrompt:
         items,
         generatedAt: new Date().toISOString(),
       },
-      rawOutput,
+      rawOutput: response,
     };
   } catch (error) {
     return {
       result: null,
-      error: error instanceof Error ? error.message : "搜索失败",
-      rawOutput: "",
+      error: error instanceof Error ? error.message : "搜索生成失败，请重试。",
     };
   }
-}
-
-export async function previewShoppingPromptPayload(
-  mode: "catalog" | "search",
-  params?: { query?: string; refreshPrompt?: string; searchPrompt?: string },
-): Promise<{ messages: LLMMessage[]; characterName: string; model: string; presetName: string }> {
-  const apiConfig = resolveShoppingApiConfig();
-  if (!apiConfig) throw new Error("未找到可用的 API 配置");
-  const prompt = mode === "search"
-    ? applySearchPromptTemplate(params?.searchPrompt || DEFAULT_SHOPPING_SEARCH_PROMPT, params?.query?.trim() || "礼物")
-    : (params?.refreshPrompt || DEFAULT_SHOPPING_REFRESH_PROMPT);
-  const messages = [{ role: "user" as const, content: prompt, _debugMeta: { marker: mode === "search" ? "shopping_search" : "shopping_catalog" } }];
-  return {
-    messages: previewMessagesForApi(apiConfig, null, messages),
-    characterName: mode === "search" ? "购物搜索" : "购物App",
-    model: apiConfig.defaultModel,
-    presetName: "(无预设)",
-  };
 }
